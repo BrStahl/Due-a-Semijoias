@@ -1,0 +1,49 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=Inter:wght@100;200;300;400;500;600;700;800;900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-serif: "Cormorant Garamond", "Georgia", serif;
+  --font-sans: "Inter", "Helvetica Neue", Arial, sans-serif;
+
+  --color-brand-red: #520F12;
+  --color-brand-red-dark: #3E0B0E;
+  --color-brand-vinho: #2A0606;
+  --color-brand-gold: #D4AF37;
+  --color-brand-gold-dark: #AA8B29;
+  --color-brand-gold-light: rgba(212, 175, 55, 0.5);
+  --color-brand-white: #FFFFFF;
+  --color-brand-off-white: #FDFCFB;
+  --color-brand-border: rgba(212, 175, 55, 0.3);
+  --color-text-dark: #2D2D2D;
+
+  --keyframes-slow-zoom: {
+    from { transform: scale(1); }
+    to { transform: scale(1.1); }
+  };
+  --animation-slow-zoom: slow-zoom 20s ease-in-out infinite alternate;
+}
+
+@layer base {
+  body {
+    @apply bg-brand-red text-white font-sans antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-serif font-bold text-brand-gold;
+  }
+}
+
+@layer components {
+  .btn-gold {
+    @apply bg-brand-gold hover:bg-brand-gold-dark text-brand-red font-medium py-3 px-8 transition-all duration-300 uppercase tracking-[2px] text-xs shadow-[0_4px_15px_rgba(212,175,55,0.2)];
+  }
+
+  .btn-outline-gold {
+    @apply border border-brand-gold text-brand-gold hover:bg-brand-gold hover:text-brand-red font-medium py-3 px-8 transition-all duration-300 uppercase tracking-[2px] text-xs;
+  }
+
+  .border-v {
+    @apply border-brand-border;
+  }
+}
+
