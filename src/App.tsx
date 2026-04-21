@@ -26,6 +26,7 @@ import {
 import { Product, Category, CartItem } from './types.ts';
 import { loadStripe } from '@stripe/stripe-js';
 import { cn } from './lib/utils';
+import { Analytics } from '@vercel/analytics/react';
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || 'pk_test_placeholder');
 
@@ -1757,6 +1758,7 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+      <Analytics />
     </div>
   );
 }
