@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, FormEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   ShoppingBag, 
@@ -21,16 +21,30 @@ import {
   Minus,
   CheckCircle2,
   CreditCard,
-  Diamond
+  Diamond,
+  User,
+  LogOut,
+  Calendar,
+  Box,
+  Save,
+  Check,
+  PlusCircle,
+  ClipboardList,
+  RefreshCw,
+  Phone,
+  Edit,
+  ImagePlus,
+  Image as ImageIcon,
+  Upload
 } from 'lucide-react';
-import { Product, Category, CartItem } from './types.ts';
+import { Product, Category, CartItem, Customer, Order, Banner } from './types.ts';
 import { loadStripe } from '@stripe/stripe-js';
 import { cn } from './lib/utils';
-import { Analytics } from '@vercel/analytics/react';
+import { supabase } from './lib/supabase';
 
 const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || 'pk_test_placeholder');
 
-const BANNER_ITEMS = [
+const INITIAL_BANNERS = [
   {
     imageOnly: true,
     title: "Nova Coleção", // Fallbacks if needed by types or structure
@@ -91,7 +105,9 @@ export default function App() {
   const [isProductsOpen, setIsProductsOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null);
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
+  const [dynamicCategories, setDynamicCategories] = useState<string[]>(PRODUCT_CATEGORIES);
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [checkoutLoading, setCheckoutLoading] = useState(false);
@@ -110,25 +126,364 @@ export default function App() {
   const [currentProductPage, setCurrentProductPage] = useState(0);
   const [currentDestaquesPage, setCurrentDestaquesPage] = useState(0);
 
+  // Authentication & Customer State
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [profile, setProfile] = useState<Customer | null>(null);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [adminTab, setAdminTab] = useState<'profile' | 'products' | 'stock' | 'orders' | 'banners'>('profile');
+  const [allOrders, setAllOrders] = useState<Order[]>([]);
+  const [banners, setBanners] = useState<Banner[]>(INITIAL_BANNERS);
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [newProductVariants, setNewProductVariants] = useState<{ name: string; price: number }[]>([]);
+
+  const isAdmin = currentUser?.email === 'duenajoias@gmail.com' || profile?.role === 'admin';
+
   useEffect(() => {
-    const fetchProducts = async () => {
-      try {
-        const response = await fetch('/api/products');
-        if (!response.ok) throw new Error('Falha ao carregar produtos');
-        const data = await response.json();
-        setProducts(data);
-      } catch (error) {
-        console.error('Erro ao buscar produtos:', error);
-      } finally {
-        setIsProductsLoading(false);
+    fetchBanners();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setCurrentUser(session?.user ?? null);
+      if (session?.user) {
+        fetchProfile(session.user.id);
+        fetchOrders(session.user.id);
       }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setCurrentUser(session?.user ?? null);
+      if (session?.user) {
+        fetchProfile(session.user.id);
+        fetchOrders(session.user.id);
+        if (session.user.email === 'duenajoias@gmail.com') {
+          fetchAllOrders();
+        }
+      } else {
+        setProfile(null);
+        setOrders([]);
+        setAllOrders([]);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const fetchAllOrders = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*, order_items(*), customers(*)')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      setAllOrders(data);
+    } catch (error) {
+      console.error('Error fetching all orders:', error);
+    }
+  };
+
+  const fetchBanners = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('banners')
+        .select('*')
+        .order('order', { ascending: true });
+      
+      if (error) {
+        // If table doesn't exist yet, we stick with initial constants
+        setBanners(INITIAL_BANNERS);
+        return;
+      }
+      
+      if (data && data.length > 0) {
+        setBanners(data);
+      } else {
+        setBanners(INITIAL_BANNERS);
+      }
+    } catch (error) {
+      setBanners(INITIAL_BANNERS);
+      console.error('Error fetching banners:', error);
+    }
+  };
+
+  const uploadImage = async (file: File, bucket: string, silent: boolean = false) => {
+    try {
+      if (!silent) setUploadLoading(true);
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`;
+      const filePath = `${fileName}`;
+
+      console.log(`[uploadImage] Uploading to ${bucket}/${filePath}...`);
+      const { error: uploadError } = await supabase.storage
+        .from(bucket)
+        .upload(filePath, file);
+
+      if (uploadError) {
+        console.error('[uploadImage] Error:', uploadError);
+        if (uploadError.message.includes('row-level security policy')) {
+          alert('ERRO DE PERMISSÃO NO SUPABASE:\n\nSeu Bucket de imagens está travado pelo RLS. \n\nPara resolver:\n1. Vá no Supabase > Storage > Buckets\n2. Clique em "product-images" > Policies\n3. Crie uma política que permita "INSERT" e "SELECT" para todos os usuários (ou desative o RLS do bucket).');
+        }
+        throw uploadError;
+      }
+
+      const { data: { publicUrl } } = supabase.storage
+        .from(bucket)
+        .getPublicUrl(filePath);
+
+      return publicUrl;
+    } catch (err) {
+      console.error('[uploadImage] Critical error:', err);
+      throw err;
+    } finally {
+      if (!silent) setUploadLoading(false);
+    }
+  };
+
+  const fetchProfile = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('customers')
+        .select('*')
+        .eq('id', userId)
+        .single();
+      
+      if (error) throw error;
+      setProfile(data);
+    } catch (error) {
+      console.error('Error fetching profile:', error);
+    }
+  };
+
+  const fetchOrders = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*, order_items(*)')
+        .eq('customer_id', userId)
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      setOrders(data);
+    } catch (error) {
+      console.error('Error fetching orders:', error);
+    }
+  };
+
+  const handleAuth = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    
+    const formData = new FormData(e.currentTarget);
+    const email = formData.get('email') as string;
+    const password = formData.get('password') as string;
+    const fullName = formData.get('fullName') as string;
+    const cpf = formData.get('cpf') as string;
+    const phone = formData.get('phone') as string;
+    const cep = formData.get('cep') as string;
+
+    if (!email || !password) {
+      alert('Por favor, preencha e-mail e senha.');
+      return;
+    }
+
+    if (authMode === 'signup' && (!fullName || !cpf || !phone || !cep)) {
+      alert('Todos os campos cadastrais são obrigatórios.');
+      return;
+    }
+
+    setAuthLoading(true);
+    console.log('Dados submetidos:', { authMode, email, fullName });
+
+    try {
+      if (authMode === 'signup') {
+        console.log('Chamando Supabase Auth SignUp...');
+        const { data, error } = await supabase.auth.signUp({ 
+          email, 
+          password,
+          options: {
+            data: { 
+              full_name: fullName,
+              cpf: cpf,
+              phone: phone
+            }
+          }
+        });
+        
+        if (error) {
+          console.error('Erro Auth:', error);
+          alert('Erro no Cadastro: ' + error.message);
+          throw error;
+        }
+
+        if (data.user) {
+          console.log('Usuário Auth criado:', data.user.id);
+          
+          const profileData: any = {
+            id: data.user.id,
+            full_name: fullName,
+            email: email,
+            cpf: cpf,
+            phone: phone,
+            cep: cep,
+            role: 'customer'
+          };
+
+          // Inserção na tabela customers
+          const { error: profileError } = await supabase
+            .from('customers')
+            .upsert(profileData); // Usamos upsert para evitar erro de duplicidade se o usuário já existir mas o perfil não
+          
+          if (profileError) {
+            console.error('Erro Perfil:', profileError);
+            alert('Conta criada, mas houve um erro ao salvar seus dados: ' + profileError.message);
+          } else {
+            console.log('Perfil salvo com sucesso!');
+            alert('SEU CADASTRO FOI RECEBIDO! \n\nAcabamos de enviar um e-mail de confirmação para ' + email + '. \n\nPor favor, verifique sua caixa de entrada (e o spam) para ativar sua conta.');
+          }
+        } else {
+          // Se não tem user mas não deu erro, geralmente significa que o usuário já existe no Auth
+          alert('Este e-mail já pode estar em uso ou aguardando confirmação. Verifique sua caixa de entrada.');
+        }
+      } else {
+        console.log('Chamando Supabase Auth SignIn...');
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) {
+          alert('Erro ao entrar: ' + error.message);
+          throw error;
+        }
+      }
+      setIsAuthModalOpen(false);
+    } catch (error: any) {
+      console.error('Falha geral na autenticação:', error);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleUpdateProfile = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!currentUser || !profile) return;
+
+    const formData = new FormData(e.currentTarget);
+    const updates: Partial<Customer> = {
+      full_name: formData.get('full_name') as string,
+      phone: formData.get('phone') as string,
+      cpf: formData.get('cpf') as string,
+      cep: formData.get('cep') as string,
+      address: formData.get('address') as string,
+      number: formData.get('number') as string,
+      complement: formData.get('complement') as string,
+      neighborhood: formData.get('neighborhood') as string,
+      city: formData.get('city') as string,
+      state: formData.get('state') as string,
     };
+
+    setProfileLoading(true);
+    try {
+      const { error } = await supabase
+        .from('customers')
+        .update(updates)
+        .eq('id', currentUser.id);
+      
+      if (error) throw error;
+      setProfile({ ...profile, ...updates });
+      alert('Perfil atualizado com sucesso!');
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setProfileLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setIsProfileModalOpen(false);
+  };
+
+  const fetchProducts = async () => {
+    try {
+      setIsProductsLoading(true);
+      const url = import.meta.env.VITE_SUPABASE_URL;
+      const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+      if (!url || !key || url.includes('placeholder')) {
+        console.error('ERRO: Variáveis de ambiente do Supabase não configuradas no painel de Secrets.');
+        setIsProductsLoading(false);
+        return;
+      }
+
+      console.log('Iniciando busca no Supabase com estrutura atualizada...');
+      
+      // Buscando da tabela "products" com relação "product_variants" (singular)
+      const { data, error } = await supabase
+        .from('products')
+        .select(`
+          *,
+          product_variants (*)
+        `)
+        .eq('active', true) // Apenas produtos ativos
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Erro na busca Supabase:', error);
+        throw error;
+      }
+
+      if (data) {
+        console.log('Dados crus recebidos:', data);
+        const mapped = data.map((p: any) => {
+          const variants = p.product_variants || [];
+          
+          const basePrice = variants.length > 0 
+            ? Math.min(...variants.map((v: any) => Number(v.price) || 0))
+            : 0;
+
+          return {
+            id: String(p.id),
+            name: p.name || 'Sem nome',
+            category: p.category || 'Geral',
+            price: basePrice,
+            image: p.image_url || 'https://images.unsplash.com/photo-1512331283953-19967202267a?auto=format&fit=crop&q=80&w=600',
+            badge: p.active && p.created_at && (new Date().getTime() - new Date(p.created_at).getTime() < 7 * 24 * 60 * 60 * 1000) ? 'Novidade' : undefined,
+            description: p.description || '',
+            variants: variants.map((v: any) => ({
+              id: String(v.id),
+              name: v.title || v.sku || v.label || 'Opção',
+              price: Number(v.price) || basePrice
+            }))
+          };
+        });
+
+        setProducts(mapped);
+
+        // Atualiza as categorias dinamicamente baseado no que tem no banco
+        const catsFromDb = Array.from(new Set(data.map((p: any) => p.category).filter(Boolean))) as string[];
+        if (catsFromDb.length > 0) {
+          const uniqueCats = Array.from(new Set([...PRODUCT_CATEGORIES, ...catsFromDb]));
+          setDynamicCategories(uniqueCats);
+        }
+      }
+    } catch (error: any) {
+      console.error('Erro crítico na integração Supabase:', error.message);
+    } finally {
+      setIsProductsLoading(false);
+    }
+  };
+
+  useEffect(() => {
     fetchProducts();
   }, []);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setCurrentBanner((prev) => (prev + 1) % BANNER_ITEMS.length);
+      setBanners(currentBanners => {
+        if (currentBanners.length === 0) return currentBanners;
+        setCurrentBanner((prev) => (prev + 1) % currentBanners.length);
+        return currentBanners;
+      });
     }, 6000);
     return () => clearInterval(timer);
   }, []);
@@ -151,17 +506,23 @@ export default function App() {
     }
   }, []);
 
-  const handleAddToCart = (product: Product) => {
+  const handleAddToCart = (product: Product, variantId?: string) => {
     setCartItems(prev => {
-      const existing = prev.find(item => item.id === product.id);
+      const selectedVariant = product.variants?.find(v => v.id === variantId);
+      const uniqueId = selectedVariant ? `${product.id}-${selectedVariant.id}` : product.id;
+      const itemName = selectedVariant ? `${product.name} - ${selectedVariant.name}` : product.name;
+      const itemPrice = selectedVariant ? selectedVariant.price : product.price;
+
+      const existing = prev.find(item => item.id === uniqueId);
       if (existing) {
         return prev.map(item => 
-          item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
+          item.id === uniqueId ? { ...item, quantity: item.quantity + 1 } : item
         );
       }
-      return [...prev, { ...product, quantity: 1 }];
+      return [...prev, { ...product, id: uniqueId, name: itemName, price: itemPrice, quantity: 1 }];
     });
     setSelectedProduct(null);
+    setSelectedVariantId(null);
     setIsCartOpen(true);
   };
 
@@ -271,7 +632,7 @@ export default function App() {
                           Todos os Produtos
                         </button>
                       </li>
-                      {PRODUCT_CATEGORIES.map((cat) => (
+                      {dynamicCategories.map((cat) => (
                         <li key={cat}>
                           <button 
                             onClick={() => setActiveCategory(cat)}
@@ -344,6 +705,13 @@ export default function App() {
                   onClick={() => setIsSearchOpen(!isSearchOpen)}
                 />
               </div>
+
+              <div 
+                className="cursor-pointer group" 
+                onClick={() => currentUser ? setIsProfileModalOpen(true) : setIsAuthModalOpen(true)}
+              >
+                <User size={20} className="group-hover:text-brand-gold transition-colors" />
+              </div>
               
               <motion.div 
                 key={`cart-${cartCount}`}
@@ -398,7 +766,7 @@ export default function App() {
                         exit={{ height: 0, opacity: 0 }}
                         className="overflow-hidden bg-brand-off-white flex flex-col gap-3 py-4"
                       >
-                        {PRODUCT_CATEGORIES.map((cat) => (
+                        {dynamicCategories.map((cat) => (
                           <button 
                             key={cat} 
                             onClick={() => { setActiveCategory(cat); setIsMenuOpen(false); }}
@@ -425,7 +793,7 @@ export default function App() {
       {/* Hero Section - Carousel */}
       {(!activeCategory && !searchQuery) && (
         <>
-          <section className="relative overflow-hidden min-h-[calc(100vh-240px)] flex flex-col">
+          <section className="relative overflow-hidden flex flex-col bg-[#1A0505]">
             <AnimatePresence mode="wait">
               <motion.div
                 key={currentBanner}
@@ -433,34 +801,34 @@ export default function App() {
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 1 }}
-                className={BANNER_ITEMS[currentBanner].imageOnly ? "flex-1 flex" : "flex-1 grid grid-cols-1 md:grid-cols-2"}
+                className={banners[currentBanner]?.imageOnly ? "flex-1 w-full" : "flex-1 grid grid-cols-1 md:grid-cols-2 w-full"}
               >
-                {BANNER_ITEMS[currentBanner].imageOnly ? (
-                  <div className="w-full h-full min-h-[500px] flex-1 relative cursor-pointer" onClick={() => document.getElementById('novidades')?.scrollIntoView({ behavior: 'smooth' })}>
+                {banners[currentBanner]?.imageOnly ? (
+                  <div className="w-full h-full relative cursor-pointer group flex items-center justify-center" onClick={() => document.getElementById('novidades')?.scrollIntoView({ behavior: 'smooth' })}>
                     <img 
-                      src={BANNER_ITEMS[currentBanner].image} 
+                      src={banners[currentBanner]?.image} 
                       alt="Banner Exclusivo" 
-                      className="absolute inset-0 w-full h-full object-cover md:object-[center_20%]"
+                      className="w-full h-auto max-h-[90vh] object-contain"
                       referrerPolicy="no-referrer"
                     />
-                    <div className="absolute inset-0 bg-black/10 hover:bg-transparent transition-colors z-10" />
+                    <div className="absolute inset-0 bg-black/5 group-hover:bg-transparent transition-colors z-10" />
                   </div>
                 ) : (
                   <>
-                    <div className={`${BANNER_ITEMS[currentBanner].color} p-6 md:p-[80px] md:px-[60px] flex flex-col justify-center border-r border-brand-gold/20 relative`}>
+                    <div className={`${banners[currentBanner]?.color || 'bg-[#5D0B1B]'} p-6 md:p-[80px] md:px-[60px] flex flex-col justify-center border-r border-brand-gold/20 relative`}>
                       <motion.div
                         initial={{ opacity: 0, x: -50 }}
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ duration: 0.8, delay: 0.3 }}
                       >
                         <span className="text-brand-gold text-sm uppercase tracking-[3px] mb-5 block font-medium">
-                          {BANNER_ITEMS[currentBanner].subtitle}
+                          {banners[currentBanner]?.subtitle}
                         </span>
                         <h2 className="text-5xl md:text-[56px] font-serif mb-6 leading-[1.1] text-brand-gold">
-                          {BANNER_ITEMS[currentBanner].title}
+                          {banners[currentBanner]?.title}
                         </h2>
                         <p className="text-white/70 text-base leading-[1.6] mb-10 max-w-[400px]">
-                          {BANNER_ITEMS[currentBanner].description}
+                          {banners[currentBanner]?.description}
                         </p>
                         <div className="flex flex-col sm:flex-row gap-4">
                           <a href="#colecoes" className="btn-gold group flex items-center justify-center gap-2">
@@ -483,9 +851,9 @@ export default function App() {
                         className="relative z-10 w-[280px] md:w-[320px] aspect-[4/5] border border-brand-gold flex items-center justify-center"
                       >
                         <img 
-                          src={BANNER_ITEMS[currentBanner].image} 
-                          alt={BANNER_ITEMS[currentBanner].title} 
-                          onError={(e) => { e.currentTarget.src = 'https://images.unsplash.com/photo-1599643477877-537ef5278531?auto=format&fit=crop&q=80&w=1000' }}
+                          src={banners[currentBanner]?.image} 
+                          alt={banners[currentBanner]?.title} 
+                          onError={(e) => { e.currentTarget.src = 'https://images.unsplash.com/photo-1512331283953-19967202267a?auto=format&fit=crop&q=80&w=1000' }}
                           className="absolute inset-0 w-full h-full object-cover p-2"
                           referrerPolicy="no-referrer"
                         />
@@ -503,24 +871,27 @@ export default function App() {
             {/* Carousel Controls */}
             <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-6 z-20">
               <button 
-                onClick={() => setCurrentBanner((prev) => (prev - 1 + BANNER_ITEMS.length) % BANNER_ITEMS.length)}
+                onClick={() => setCurrentBanner((prev) => (prev - 1 + banners.length) % banners.length)}
                 className="w-10 h-10 border border-brand-gold/30 flex items-center justify-center text-brand-gold hover:bg-brand-gold hover:text-brand-red transition-all"
               >
                 <ChevronLeft size={20} />
               </button>
               
               <div className="flex gap-3">
-                {BANNER_ITEMS.map((_, idx) => (
+                {banners.map((_, idx) => (
                   <button
                     key={idx}
                     onClick={() => setCurrentBanner(idx)}
-                    className={`w-2 h-2 rounded-full transition-all duration-300 ${idx === currentBanner ? 'bg-brand-gold w-8' : 'bg-brand-gold/30'}`}
+                    className={cn(
+                      "w-2 h-2 rounded-full transition-all duration-300",
+                      currentBanner === idx ? "bg-brand-gold w-6" : "bg-white/30 hover:bg-white/50"
+                    )}
                   />
                 ))}
               </div>
 
               <button 
-                onClick={() => setCurrentBanner((prev) => (prev + 1) % BANNER_ITEMS.length)}
+                onClick={() => setCurrentBanner((prev) => (prev + 1) % banners.length)}
                 className="w-10 h-10 border border-brand-gold/30 flex items-center justify-center text-brand-gold hover:bg-brand-gold hover:text-brand-red transition-all"
               >
                 <ChevronRight size={20} />
@@ -729,7 +1100,13 @@ export default function App() {
                           <Search size={18} />
                         </button>
                         <button 
-                          onClick={() => handleAddToCart(product)}
+                          onClick={() => {
+                            if (product.variants && product.variants.length > 0) {
+                              setSelectedProduct(product);
+                            } else {
+                              handleAddToCart(product);
+                            }
+                          }}
                           className="bg-brand-gold text-white p-3 border border-brand-gold hover:bg-brand-red transition-colors shadow-sm"
                         >
                           <ShoppingBag size={18} />
@@ -797,7 +1174,7 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setSelectedProduct(null)}
+              onClick={() => { setSelectedProduct(null); setSelectedVariantId(null); }}
               className="absolute inset-0 bg-brand-gold/10 backdrop-blur-md"
             />
             <motion.div
@@ -808,7 +1185,7 @@ export default function App() {
               className="relative bg-brand-red w-full max-w-4xl border border-brand-gold/20 overflow-hidden shadow-2xl flex flex-col md:flex-row"
             >
               <button 
-                onClick={() => setSelectedProduct(null)}
+                onClick={() => { setSelectedProduct(null); setSelectedVariantId(null); }}
                 className="absolute top-6 right-6 z-10 bg-brand-red border border-brand-gold/10 p-2 hover:bg-brand-gold hover:text-brand-red text-brand-gold transition-all shadow-md"
               >
                 <X size={20} />
@@ -827,13 +1204,41 @@ export default function App() {
                 <span className="text-brand-gold text-xs uppercase tracking-[3px] font-bold mb-3">{selectedProduct.category}</span>
                 <h3 className="text-3xl md:text-5xl font-serif text-brand-gold mb-6 leading-tight">{selectedProduct.name}</h3>
                 
-                <p className="text-4xl font-sans font-bold text-white mb-10">
-                  R$ {selectedProduct.price.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                <p className="text-4xl font-sans font-bold text-white mb-8">
+                  R$ {(selectedProduct.variants?.find(v => v.id === selectedVariantId)?.price || selectedProduct.price).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                 </p>
+                <div className="h-px bg-brand-gold/20 w-full mb-8"></div>
+
+                {selectedProduct.variants && selectedProduct.variants.length > 0 && (
+                  <div className="mb-10">
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="text-brand-gold text-[10px] uppercase tracking-[3px] font-bold">Opções Disponíveis</span>
+                      {!selectedVariantId && (
+                        <span className="text-brand-gold/60 text-[9px] uppercase tracking-widest italic">* Selecione uma opção</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      {selectedProduct.variants.map((variant) => (
+                        <button
+                          key={variant.id}
+                          onClick={() => setSelectedVariantId(variant.id)}
+                          className={cn(
+                            "px-4 py-3 text-[10px] uppercase tracking-[2px] border transition-all duration-300 font-medium",
+                            selectedVariantId === variant.id 
+                              ? "bg-brand-gold text-white border-brand-gold shadow-lg scale-[1.02]" 
+                              : "bg-brand-red-dark text-white/40 border-brand-gold/10 hover:border-brand-gold/40 hover:text-white/70"
+                          )}
+                        >
+                          {variant.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="space-y-6 mb-12">
                   <p className="text-sm text-white/70 font-light leading-relaxed">
-                    Semi joia exclusiva banhada a ouro 18k com tecnologia hipoalergênica. Acabamento polido a mão com padrão de exportação.
+                    {selectedProduct.description || "Semi joia exclusiva banhada a ouro 18k com tecnologia hipoalergênica. Acabamento polido a mão com padrão de exportação."}
                     <br /><br />
                     • Garantia de 1 ano no banho<br />
                     • Design assinado e limitado
@@ -842,8 +1247,9 @@ export default function App() {
                 
                 <div className="flex flex-col gap-4">
                   <button 
-                    onClick={() => handleAddToCart(selectedProduct)}
-                    className="btn-gold flex items-center justify-center gap-3 py-5"
+                    onClick={() => handleAddToCart(selectedProduct, selectedVariantId || undefined)}
+                    disabled={selectedProduct.variants && selectedProduct.variants.length > 0 && !selectedVariantId}
+                    className="btn-gold flex items-center justify-center gap-3 py-5 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Adicionar ao Carrinho
                   </button>
@@ -921,7 +1327,13 @@ export default function App() {
                           <Search size={18} />
                         </button>
                         <button 
-                          onClick={() => handleAddToCart(product)}
+                          onClick={() => {
+                            if (product.variants && product.variants.length > 0) {
+                              setSelectedProduct(product);
+                            } else {
+                              handleAddToCart(product);
+                            }
+                          }}
                           className="bg-brand-gold text-white p-3 border border-brand-gold hover:bg-brand-red transition-colors shadow-sm"
                         >
                           <ShoppingBag size={18} />
@@ -1415,7 +1827,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* About Us Modal */}
+      {/* About Modal */}
       <AnimatePresence>
         {isAboutOpen && (
           <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
@@ -1462,6 +1874,883 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Auth Modal */}
+      <AnimatePresence>
+        {isAuthModalOpen && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsAuthModalOpen(false)}
+              className="absolute inset-0 bg-brand-gold/20 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-brand-red w-full max-w-md border border-brand-gold/20 shadow-2xl p-8 md:p-12 text-white"
+            >
+              <button 
+                onClick={() => setIsAuthModalOpen(false)}
+                className="absolute top-6 right-6 text-brand-gold hover:text-white transition-colors"
+              >
+                <X size={24} />
+              </button>
+
+              <h2 className="text-3xl font-serif text-brand-gold mb-8 text-center uppercase tracking-widest">
+                {authMode === 'login' ? 'Acesse sua Conta' : 'Crie sua Conta'}
+              </h2>
+
+              <form onSubmit={handleAuth} className="space-y-4">
+                {authMode === 'signup' && (
+                  <div className="space-y-4 bg-white/5 p-4 border border-brand-gold/10 mb-2">
+                    <p className="text-[10px] text-brand-gold uppercase tracking-widest font-bold border-b border-brand-gold/10 pb-2 mb-4">Dados Cadastrais</p>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Nome Completo</label>
+                      <input 
+                        name="fullName"
+                        type="text" 
+                        required
+                        className="w-full bg-brand-red-dark border border-brand-gold/20 px-4 py-2 text-xs focus:outline-none focus:border-brand-gold text-white"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">CPF</label>
+                        <input 
+                          name="cpf"
+                          type="text" 
+                          required
+                          placeholder="000.000.000-00"
+                          className="w-full bg-brand-red-dark border border-brand-gold/20 px-4 py-2 text-xs focus:outline-none focus:border-brand-gold text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Telefone</label>
+                        <input 
+                          name="phone"
+                          type="tel" 
+                          required
+                          placeholder="(00) 00000-0000"
+                          className="w-full bg-brand-red-dark border border-brand-gold/20 px-4 py-2 text-xs focus:outline-none focus:border-brand-gold text-white"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">CEP</label>
+                      <input 
+                        name="cep"
+                        type="text" 
+                        required
+                        placeholder="00000-000"
+                        className="w-full bg-brand-red-dark border border-brand-gold/20 px-4 py-2 text-xs focus:outline-none focus:border-brand-gold text-white"
+                      />
+                    </div>
+                  </div>
+                )}
+                
+                <div className={cn("space-y-4", authMode === 'signup' ? "pt-2" : "")}>
+                  {authMode === 'signup' && <p className="text-[10px] text-brand-gold uppercase tracking-widest font-bold border-b border-brand-gold/10 pb-2 mb-4">Dados de Acesso</p>}
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">E-mail</label>
+                    <input 
+                      name="email"
+                      type="email" 
+                      required
+                      className="w-full bg-brand-red-dark border border-brand-gold/20 px-4 py-2 text-xs focus:outline-none focus:border-brand-gold text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Senha</label>
+                    <input 
+                      name="password"
+                      type="password" 
+                      required
+                      className="w-full bg-brand-red-dark border border-brand-gold/20 px-4 py-2 text-xs focus:outline-none focus:border-brand-gold text-white"
+                    />
+                  </div>
+                </div>
+
+                <button 
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full btn-gold py-3 uppercase tracking-[3px] text-xs font-bold shadow-lg disabled:opacity-50 mt-4"
+                >
+                  {authLoading ? 'Processando...' : (authMode === 'login' ? 'Entrar' : 'Cadastrar')}
+                </button>
+              </form>
+
+              <div className="mt-8 text-center">
+                <button 
+                  onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
+                  className="text-[10px] uppercase tracking-widest text-brand-gold hover:text-white transition-colors border-b border-brand-gold pb-1"
+                >
+                  {authMode === 'login' ? 'Não tem conta? Cadastre-se' : 'Já tem conta? Faça Login'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Profile & Orders Modal */}
+      <AnimatePresence>
+        {isProfileModalOpen && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsProfileModalOpen(false)}
+              className="absolute inset-0 bg-brand-gold/20 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-brand-red w-full max-w-5xl h-[85vh] border border-brand-gold/20 shadow-2xl p-6 md:p-10 text-white flex flex-col"
+            >
+              <button 
+                onClick={() => setIsProfileModalOpen(false)}
+                className="absolute top-6 right-6 text-brand-gold hover:text-white transition-colors z-50"
+              >
+                <X size={24} />
+              </button>
+
+              <div className="flex flex-col md:flex-row gap-8 h-full overflow-hidden">
+                {/* Dashboard Sidebar */}
+                <div className="w-full md:w-64 border-b md:border-b-0 md:border-r border-brand-gold/10 pb-6 md:pb-0 md:pr-6 space-y-2 shrink-0">
+                  <p className="text-[10px] uppercase tracking-[2px] text-brand-gold mb-6 font-bold opacity-50">
+                    {isAdmin ? 'Painel Administrativo' : 'Sua Conta'}
+                  </p>
+                  
+                  <button 
+                    onClick={() => setAdminTab('profile')}
+                    className={cn(
+                      "w-full text-left px-4 py-3 text-[11px] uppercase tracking-widest font-bold transition-all flex items-center gap-3",
+                      adminTab === 'profile' ? "bg-brand-gold text-brand-red" : "text-white/60 hover:text-brand-gold hover:bg-brand-gold/5"
+                    )}
+                  >
+                    <User size={16} /> Meu Perfil
+                  </button>
+
+                  {isAdmin && (
+                    <>
+                      <button 
+                        onClick={() => setAdminTab('products')}
+                        className={cn(
+                          "w-full text-left px-4 py-3 text-[11px] uppercase tracking-widest font-bold transition-all flex items-center gap-3",
+                          adminTab === 'products' ? "bg-brand-gold text-brand-red" : "text-white/60 hover:text-brand-gold hover:bg-brand-gold/5"
+                        )}
+                      >
+                        <PlusCircle size={16} /> Cadastro de Produto
+                      </button>
+                      <button 
+                        onClick={() => setAdminTab('stock')}
+                        className={cn(
+                          "w-full text-left px-4 py-3 text-[11px] uppercase tracking-widest font-bold transition-all flex items-center gap-3",
+                          adminTab === 'stock' ? "bg-brand-gold text-brand-red" : "text-white/60 hover:text-brand-gold hover:bg-brand-gold/5"
+                        )}
+                      >
+                        <ClipboardList size={16} /> Controle de Estoque
+                      </button>
+                      <button 
+                        onClick={() => setAdminTab('banners')}
+                        className={cn(
+                          "w-full text-left px-4 py-3 text-[11px] uppercase tracking-widest font-bold transition-all flex items-center gap-3",
+                          adminTab === 'banners' ? "bg-brand-gold text-brand-red" : "text-white/60 hover:text-brand-gold hover:bg-brand-gold/5"
+                        )}
+                      >
+                        <ImageIcon size={16} /> Banners do Site
+                      </button>
+                    </>
+                  )}
+
+                  <button 
+                    onClick={() => setAdminTab('orders')}
+                    className={cn(
+                      "w-full text-left px-4 py-3 text-[11px] uppercase tracking-widest font-bold transition-all flex items-center gap-3",
+                      adminTab === 'orders' ? "bg-brand-gold text-brand-red" : "text-white/60 hover:text-brand-gold hover:bg-brand-gold/5"
+                    )}
+                  >
+                    <Package size={16} /> {isAdmin ? 'Meus Pedidos' : 'Meus Pedidos'}
+                  </button>
+
+                  <div className="pt-6 mt-6 border-t border-brand-gold/10">
+                    <button 
+                      onClick={handleSignOut}
+                      className="w-full text-left px-4 py-3 text-[11px] uppercase tracking-widest font-bold text-red-400 hover:bg-red-400/5 transition-all flex items-center gap-3"
+                    >
+                      <LogOut size={16} /> Sair
+                    </button>
+                  </div>
+                </div>
+
+                {/* Content Area */}
+                <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
+                  {adminTab === 'profile' && (
+                    <div className="space-y-8 animate-in fade-in duration-500">
+                      <h2 className="text-2xl font-serif text-brand-gold uppercase tracking-widest">Seu Perfil</h2>
+                      <form onSubmit={handleUpdateProfile} className="space-y-4 max-w-2xl">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-[9px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Nome Completo</label>
+                            <input name="full_name" defaultValue={profile?.full_name} className="w-full bg-brand-red-dark border border-brand-gold/20 px-3 py-2 text-xs focus:outline-none focus:border-brand-gold" />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] uppercase tracking-widest text-brand-gold mb-1 font-bold">CPF</label>
+                            <input name="cpf" defaultValue={profile?.cpf} className="w-full bg-brand-red-dark border border-brand-gold/20 px-3 py-2 text-xs focus:outline-none focus:border-brand-gold" />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Telefone</label>
+                            <input name="phone" defaultValue={profile?.phone} className="w-full bg-brand-red-dark border border-brand-gold/20 px-3 py-2 text-xs focus:outline-none focus:border-brand-gold" />
+                          </div>
+                          <div>
+                            <label className="block text-[9px] uppercase tracking-widest text-brand-gold mb-1 font-bold">CEP</label>
+                            <input name="cep" defaultValue={profile?.cep} className="w-full bg-brand-red-dark border border-brand-gold/20 px-3 py-2 text-xs focus:outline-none focus:border-brand-gold" />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-[9px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Endereço</label>
+                          <input name="address" defaultValue={profile?.address} className="w-full bg-brand-red-dark border border-brand-gold/20 px-3 py-2 text-xs focus:outline-none focus:border-brand-gold" />
+                        </div>
+                        <div className="grid grid-cols-3 gap-4">
+                          <input name="number" placeholder="Número" defaultValue={profile?.number} className="w-full bg-brand-red-dark border border-brand-gold/20 px-3 py-2 text-xs" />
+                          <input name="city" placeholder="Cidade" defaultValue={profile?.city} className="w-full bg-brand-red-dark border border-brand-gold/20 px-3 py-2 text-xs" />
+                          <input name="state" placeholder="UF" defaultValue={profile?.state} className="w-full bg-brand-red-dark border border-brand-gold/20 px-3 py-2 text-xs" />
+                        </div>
+                        <button type="submit" disabled={profileLoading} className="btn-gold py-3 px-8 uppercase tracking-widest text-[10px] font-bold shadow-xl">
+                          {profileLoading ? 'Salvando...' : 'Salvar Perfil'}
+                        </button>
+                      </form>
+                    </div>
+                  )}
+
+                    {isAdmin && adminTab === 'products' && (
+                      <div className="space-y-8 animate-in fade-in duration-500">
+                        <h2 className="text-2xl font-serif text-brand-gold uppercase tracking-widest">Novo Produto</h2>
+                        <form className="space-y-6 max-w-2xl bg-brand-red-dark p-6 border border-brand-gold/10" onSubmit={async (e) => {
+                          e.preventDefault();
+                          console.log('--- FORM SUBMIT DETECTED ---');
+                          
+                          // Validação extra de configuração
+                          if (!import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL.includes('placeholder')) {
+                            alert('ERRO: Configuração do Supabase ausente. Verifique as chaves VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY no painel de Secrets.');
+                            return;
+                          }
+
+                          const form = e.currentTarget;
+                          const formData = new FormData(form);
+                          const fileInput = form.querySelector('input[name="product_file"]') as HTMLInputElement;
+                          const file = fileInput?.files?.[0];
+                          
+                          try {
+                            setUploadLoading(true);
+                            console.log('--- ETAPA 1: Verificando Imagem ---');
+                            let finalImageUrl = String(formData.get('image_url') || '').trim();
+                            
+                            if (file) {
+                              console.log('Enviando arquivo...');
+                              finalImageUrl = await uploadImage(file, 'product-images', true);
+                              console.log('Imagem enviada:', finalImageUrl);
+                            }
+
+                            const slug = String(formData.get('name'))
+                              .toLowerCase()
+                              .normalize('NFD')
+                              .replace(/[\u0300-\u036f]/g, '')
+                              .replace(/[^\w\s-]/g, '')
+                              .replace(/\s+/g, '-')
+                              .replace(/--+/g, '-')
+                              .trim() + '-' + Math.random().toString(36).substring(2, 7);
+
+                            const newProduct = {
+                              name: String(formData.get('name')).trim(),
+                              slug: slug,
+                              category: String(formData.get('category')),
+                              description: String(formData.get('description')).trim(),
+                              image_url: finalImageUrl || 'https://images.unsplash.com/photo-1512331283953-19967202267a?auto=format&fit=crop&q=80&w=600',
+                              active: true
+                            };
+
+                            console.log('--- ETAPA 2: Inserindo Produto ---', newProduct);
+                            const { data: prod, error: prodErr } = await supabase
+                              .from('products')
+                              .insert(newProduct)
+                              .select()
+                              .single();
+
+                            if (prodErr) {
+                              console.error('Erro ao inserir produto:', prodErr);
+                              if (prodErr.message.includes('row-level security policy')) {
+                                alert('ERRO DE PERMISSÃO NO BANCO:\n\nSua tabela "products" está travada pelo RLS.\n\nPara resolver:\n1. Vá no Supabase > Database > Tables > products\n2. Clique em "RLS / Policies"\n3. Crie uma política permitindo "INSERT" e "SELECT" (ou desative o RLS da tabela).');
+                              }
+                              throw new Error(`Erro na tabela products: ${prodErr.message}`);
+                            }
+                            
+                            if (!prod || !prod.id) {
+                              throw new Error('Produto inserido mas ID não retornado pelo banco.');
+                            }
+                            console.log('Produto inserido ID:', prod.id);
+
+                            // Inserir variações
+                            const variantsToInsert = newProductVariants.length > 0 
+                              ? newProductVariants.map(v => ({ product_id: prod.id, price: Number(v.price) }))
+                              : [{ product_id: prod.id, price: Number(formData.get('price')) || 0 }];
+
+                            console.log('--- ETAPA 3: Inserindo Variantes ---', variantsToInsert);
+                            if (variantsToInsert.length === 0) {
+                               console.warn('Variantes vazias, isso não deveria ocorrer.');
+                            }
+                            const { error: varErr } = await supabase
+                              .from('product_variants')
+                              .insert(variantsToInsert);
+                            
+                            if (varErr) {
+                              console.error('Erro ao inserir variantes:', varErr);
+                              throw new Error(`Erro na tabela variants: ${varErr.message}`);
+                            }
+                            console.log('Variantes inseridas.');
+
+                            // ETAPA NOVA: Inserir na tabela product_images conforme pedido
+                            console.log('--- ETAPA EXTRA: Vinculando Imagem na tabela product_images ---');
+                            // Usando upsert para evitar duplicação se algo falhar e for tentado novamente
+                            const { error: imgTableErr } = await supabase
+                              .from('product_images')
+                              .upsert({
+                                product_id: prod.id,
+                                image_url: finalImageUrl || 'https://images.unsplash.com/photo-1512331283953-19967202267a?auto=format&fit=crop&q=80&w=600',
+                                is_primary: true,
+                                position: 0
+                              }, { onConflict: 'product_id, is_primary' });
+
+                            if (imgTableErr) {
+                              console.warn('Erro (não crítico) ao inserir em product_images:', imgTableErr);
+                              // Exibimos um alerta menor ou apenas logamos, já que o produto principal FOI salvo
+                              console.error('RLS/DB Error on product_images:', imgTableErr.message);
+                            } else {
+                              console.log('Vínculo de imagem criado com sucesso.');
+                            }
+
+                            console.log('--- ETAPA 4: Atualizando Lista ---');
+                            await fetchProducts(); 
+                            form.reset();
+                            setNewProductVariants([]);
+                            alert('SUCESSO: Produto cadastrado com todas as variações!');
+                          } catch (err: any) { 
+                            console.error('FALHA GERAL:', err);
+                            alert('ERRO NO CADASTRO: ' + (err.message || 'Erro desconhecido. Verifique o console.')); 
+                          } finally {
+                            setUploadLoading(false);
+                            console.log('--- PROCESSO FINALIZADO ---');
+                          }
+                        }}>
+                        <input name="name" placeholder="Nome" required className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs" />
+                        <select name="category" required className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs text-white">
+                          {PRODUCT_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                        </select>
+                        <textarea name="description" placeholder="Descrição" rows={3} className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs" />
+                        
+                        <div className="space-y-2">
+                          <label className="block text-[10px] uppercase tracking-widest text-brand-gold font-bold">Foto do Produto</label>
+                          <div className="flex gap-4 items-center">
+                            <label className="flex-1 border-2 border-dashed border-brand-gold/20 hover:border-brand-gold/50 transition-colors p-6 flex flex-col items-center justify-center gap-2 cursor-pointer bg-brand-red">
+                               <Upload size={20} className="text-brand-gold" />
+                               <span className="text-[10px] uppercase font-bold tracking-widest text-white/60">Upload de Arquivo</span>
+                               <input 
+                                 name="product_file"
+                                 type="file" 
+                                 className="hidden" 
+                                 accept="image/*" 
+                                 onChange={(e) => {
+                                   const fileName = e.target.files?.[0]?.name;
+                                   if (fileName) {
+                                     const span = e.currentTarget.parentElement?.querySelector('span');
+                                     if (span) span.innerText = `Arquivo: ${fileName}`;
+                                   }
+                                 }}
+                               />
+                            </label>
+                            <div className="text-[10px] uppercase tracking-widest text-white/40">OU</div>
+                            <input name="image_url" placeholder="URL da Imagem externa" className="flex-1 bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs self-stretch" />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-4">
+                          <div className="space-y-1">
+                            <label className="block text-[10px] uppercase tracking-widest text-brand-gold font-bold">Preço Base (R$)</label>
+                            <input name="price" type="number" step="0.01" placeholder="Ex: 199.90" required={newProductVariants.length === 0} className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs" />
+                          </div>
+                        </div>
+
+                        {/* Variants Section */}
+                        <div className="space-y-4 pt-4 border-t border-brand-gold/10">
+                           <div className="flex justify-between items-center">
+                              <label className="text-[11px] uppercase tracking-widest text-brand-gold font-bold">Variações do Produto</label>
+                              <button 
+                                type="button" 
+                                onClick={() => setNewProductVariants([...newProductVariants, { name: '', price: 0 }])}
+                                className="text-[9px] uppercase tracking-widest bg-brand-gold/10 text-brand-gold px-3 py-1 border border-brand-gold/20 hover:bg-brand-gold/20 transition-colors"
+                              >
+                                + Adicionar Variação
+                              </button>
+                           </div>
+                           
+                           {newProductVariants.map((variant, idx) => (
+                             <div key={idx} className="grid grid-cols-12 gap-3 items-end">
+                               <div className="col-span-6">
+                                 <input 
+                                   placeholder="Nome (Ex: Tamanho P)" 
+                                   value={variant.name}
+                                   onChange={(e) => {
+                                     const updated = [...newProductVariants];
+                                     updated[idx].name = e.target.value;
+                                     setNewProductVariants(updated);
+                                   }}
+                                   required
+                                   className="w-full bg-brand-red border border-brand-gold/20 px-3 py-2 text-xs"
+                                 />
+                               </div>
+                               <div className="col-span-4">
+                                 <input 
+                                   type="number"
+                                   step="0.01"
+                                   placeholder="Preço (R$)" 
+                                   value={variant.price || ''}
+                                   onChange={(e) => {
+                                     const updated = [...newProductVariants];
+                                     updated[idx].price = Number(e.target.value);
+                                     setNewProductVariants(updated);
+                                   }}
+                                   required
+                                   className="w-full bg-brand-red border border-brand-gold/20 px-3 py-2 text-xs"
+                                 />
+                               </div>
+                               <div className="col-span-2">
+                                 <button 
+                                   type="button" 
+                                   onClick={() => setNewProductVariants(newProductVariants.filter((_, i) => i !== idx))}
+                                   className="w-full bg-red-900/20 text-red-500 border border-red-900/30 p-2 hover:bg-red-900/30 transition-colors flex items-center justify-center"
+                                 >
+                                   <Trash2 size={14} />
+                                 </button>
+                               </div>
+                             </div>
+                           ))}
+                           {newProductVariants.length > 0 && (
+                             <p className="text-[10px] text-white/40 italic">* Se houver variações, o preço base acima será ignorado.</p>
+                           )}
+                        </div>
+                        <button type="submit" disabled={uploadLoading} className="w-full btn-gold py-4 uppercase font-bold text-xs">
+                          {uploadLoading ? 'Enviando...' : 'Salvar Produto'}
+                        </button>
+                      </form>
+                    </div>
+                  )}
+
+                  {isAdmin && adminTab === 'stock' && (
+                    <div className="space-y-8 animate-in fade-in duration-500">
+                      <h2 className="text-2xl font-serif text-brand-gold uppercase tracking-widest">Estoque</h2>
+                      <div className="border border-brand-gold/10 overflow-hidden">
+                        <table className="w-full text-left text-xs border-collapse">
+                          <thead className="bg-brand-red-dark text-brand-gold uppercase tracking-widest font-bold">
+                            <tr>
+                              <th className="p-4 border-b border-brand-gold/10">Item</th>
+                              <th className="p-4 border-b border-brand-gold/10">Preços / Variantes</th>
+                              <th className="p-4 border-b border-brand-gold/10 text-center">Ações</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {products.map(prod => (
+                              <tr key={prod.id} className="border-b border-brand-gold/5 hover:bg-white/5">
+                                <td className="p-4">
+                                  <div className="flex items-center gap-3 font-bold">{prod.name}</div>
+                                  <div className="text-[10px] text-white/40 uppercase tracking-widest mt-1">{prod.category}</div>
+                                </td>
+                                <td className="p-4">
+                                  {prod.variants?.map(v => (
+                                    <div key={v.id} className="text-[10px] text-white/60 mb-1 flex justify-between">
+                                      <span>{v.name}</span>
+                                      <span className="text-brand-gold">R$ {v.price.toFixed(2)}</span>
+                                    </div>
+                                  ))}
+                                </td>
+                                <td className="p-4 text-center">
+                                  <button 
+                                    onClick={() => setEditingProduct(prod)}
+                                    className="text-brand-gold hover:text-white transition-colors"
+                                  >
+                                    <Edit size={14} />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {isAdmin && adminTab === 'banners' && (
+                    <div className="space-y-8 animate-in fade-in duration-500">
+                      <div className="flex justify-between items-center">
+                        <h2 className="text-2xl font-serif text-brand-gold uppercase tracking-widest">Banners Principais</h2>
+                        <button onClick={() => alert('Dica: Use imagens de alta qualidade (1920x1080)')} className="text-[10px] text-brand-gold flex items-center gap-2 opacity-60">
+                           Instruções
+                        </button>
+                      </div>
+                      
+                      <div className="grid grid-cols-1 gap-8">
+                        {banners.map((banner, index) => (
+                          <div key={index} className="bg-brand-red-dark border border-brand-gold/10 p-6 flex flex-col md:flex-row gap-6 relative">
+                            <div className="w-full md:w-1/3 aspect-video border border-brand-gold/20 overflow-hidden relative group">
+                               <img src={banner.image} className="w-full h-full object-cover" />
+                               <label className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2 cursor-pointer">
+                                  <ImagePlus size={24} className="text-brand-gold" />
+                                  <span className="text-[10px] uppercase font-bold tracking-widest">Alterar Imagem</span>
+                                  <input 
+                                    type="file" 
+                                    className="hidden" 
+                                    onChange={async (e) => {
+                                      const file = e.target.files?.[0];
+                                      if (file) {
+                                        try {
+                                          const url = await uploadImage(file, 'media');
+                                          const newBanners = [...banners];
+                                          newBanners[index].image = url;
+                                          
+                                          // Update in DB if banner has ID
+                                          if (banner.id) {
+                                            await supabase.from('banners').update({ image: url }).eq('id', banner.id);
+                                          } else {
+                                            // Handle case without DB yet (save all to a settings table or just update state)
+                                            alert('Imagem alterada na visualização. Para salvar permanentemente, configure a tabela "banners".');
+                                          }
+                                          setBanners(newBanners);
+                                        } catch (err: any) { alert(err.message); }
+                                      }
+                                    }}
+                                  />
+                               </label>
+                            </div>
+                            <div className="flex-1 space-y-4">
+                               <input 
+                                 placeholder="Título (Ex: NOVA COLEÇÃO)" 
+                                 className="w-full bg-brand-red border border-brand-gold/20 px-3 py-2 text-xs" 
+                                 defaultValue={banner.title}
+                                 onBlur={async (e) => {
+                                    const newBanners = [...banners];
+                                    newBanners[index].title = e.target.value;
+                                    setBanners(newBanners);
+                                    if (banner.id) await supabase.from('banners').update({ title: e.target.value }).eq('id', banner.id);
+                                 }}
+                               />
+                               <input 
+                                 placeholder="Subtítulo (Ex: Exclusivo)" 
+                                 className="w-full bg-brand-red border border-brand-gold/20 px-3 py-2 text-xs" 
+                                 defaultValue={banner.subtitle}
+                                 onBlur={async (e) => {
+                                    const newBanners = [...banners];
+                                    newBanners[index].subtitle = e.target.value;
+                                    setBanners(newBanners);
+                                    if (banner.id) await supabase.from('banners').update({ subtitle: e.target.value }).eq('id', banner.id);
+                                 }}
+                               />
+                               <textarea 
+                                 placeholder="Descrição" 
+                                 rows={2} 
+                                 className="w-full bg-brand-red border border-brand-gold/20 px-3 py-2 text-xs" 
+                                 defaultValue={banner.description}
+                                 onBlur={async (e) => {
+                                    const newBanners = [...banners];
+                                    newBanners[index].description = e.target.value;
+                                    setBanners(newBanners);
+                                    if (banner.id) await supabase.from('banners').update({ description: e.target.value }).eq('id', banner.id);
+                                 }}
+                               />
+                               <div className="flex items-center gap-3">
+                                 <label className="text-[9px] uppercase tracking-widest text-brand-gold font-bold">Apenas Imagem?</label>
+                                 <input 
+                                   type="checkbox" 
+                                   defaultChecked={banner.imageOnly} 
+                                   onChange={async (e) => {
+                                      const newBanners = [...banners];
+                                      newBanners[index].imageOnly = e.target.checked;
+                                      setBanners(newBanners);
+                                      if (banner.id) await supabase.from('banners').update({ imageOnly: e.target.checked }).eq('id', banner.id);
+                                   }}
+                                 />
+                               </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {adminTab === 'orders' && (
+                    <div className="space-y-6 animate-in fade-in duration-500">
+                      <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-2xl font-serif text-brand-gold uppercase tracking-widest">{isAdmin ? 'Gerenciar Pedidos' : 'Meus Pedidos'}</h2>
+                        {isAdmin && <button onClick={fetchAllOrders} className="text-[10px] uppercase tracking-widest border border-brand-gold/20 px-3 py-2 flex items-center gap-2"><RefreshCw size={12} /> Sincronizar</button>}
+                      </div>
+                      <div className="space-y-4">
+                        {(isAdmin ? allOrders : orders).map((order: any) => (
+                          <div key={order.id} className="bg-brand-red-dark border border-brand-gold/10 p-4 space-y-4">
+                            <div className="flex justify-between items-start border-b border-brand-gold/10 pb-3">
+                              <div>
+                                <p className="text-[11px] font-bold text-brand-gold uppercase tracking-widest flex items-center gap-2">
+                                  <Package size={14} /> #{order.id.slice(0, 8)}
+                                </p>
+                                <p className="text-[9px] text-white/40 uppercase mt-1">
+                                  {isAdmin && <span className="text-white block mb-1">Cliente: {order.customers?.full_name}</span>}
+                                  {new Date(order.created_at).toLocaleString()}
+                                </p>
+                              </div>
+                              <div className="text-right">
+                                <span className={cn(
+                                  "px-2 py-1 text-[8px] uppercase tracking-widest font-bold border",
+                                  order.status === 'paid' ? "border-green-500 text-green-500" : "border-brand-gold text-brand-gold"
+                                )}>
+                                  {order.status === 'paid' ? 'Pago' : 'Pendente'}
+                                </span>
+                                <p className="text-sm font-bold mt-2">R$ {order.total.toFixed(2)}</p>
+                              </div>
+                            </div>
+                            <div className="space-y-2">
+                              {order.order_items?.map((item: any) => (
+                                <div key={item.id} className="text-[10px] flex justify-between opacity-70">
+                                  <span>{item.quantity}x {item.product_name}</span>
+                                  <span>R$ {item.price.toFixed(2)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                        {(isAdmin ? allOrders : orders).length === 0 && (
+                          <div className="text-center py-20 opacity-30 italic text-xs">Nenhum pedido encontrado.</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Product Edit Modal */}
+      <AnimatePresence>
+        {editingProduct && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setEditingProduct(null)}
+              className="absolute inset-0 bg-brand-red/90 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-brand-red-dark w-full max-w-2xl max-h-[90vh] overflow-y-auto border border-brand-gold/20 shadow-2xl p-8 text-white"
+            >
+              <button 
+                onClick={() => setEditingProduct(null)}
+                className="absolute top-6 right-6 text-brand-gold hover:text-white transition-colors"
+              >
+                <X size={24} />
+              </button>
+
+              <h2 className="text-2xl font-serif text-brand-gold uppercase tracking-widest mb-8">Editar Produto</h2>
+              
+              <form className="space-y-6" onSubmit={async (e) => {
+                e.preventDefault();
+                if (!editingProduct) return;
+                
+                console.log('--- STARTING UPDATE PROCESS ---');
+                const form = e.currentTarget;
+                const formData = new FormData(form);
+                const fileInput = form.querySelector('input[name="edit_product_file"]') as HTMLInputElement;
+                const file = fileInput?.files?.[0];
+                
+                try {
+                  setUploadLoading(true);
+                  let finalImageUrl = editingProduct.image;
+                  
+                  if (file) {
+                    console.log('1. Uploading image...');
+                    // Use silent=true to prevent sub-call from clearing the main loading state
+                    finalImageUrl = await uploadImage(file, 'product-images', true);
+                    console.log('1. Image uploaded:', finalImageUrl);
+                  } else if (formData.get('image_url')) {
+                    finalImageUrl = String(formData.get('image_url')).trim();
+                    console.log('1. Using specific URL:', finalImageUrl);
+                  }
+
+                  const newName = String(formData.get('name')).trim();
+                  const productUpdates: any = {
+                    name: newName,
+                    category: String(formData.get('category')),
+                    description: String(formData.get('description')).trim(),
+                    image_url: finalImageUrl,
+                  };
+
+                  // If name changed, optionally update slug to match (safe during initial setup)
+                  if (newName !== editingProduct.name) {
+                    productUpdates.slug = newName
+                      .toLowerCase()
+                      .normalize('NFD')
+                      .replace(/[\u0300-\u036f]/g, '')
+                      .replace(/[^\w\s-]/g, '')
+                      .replace(/\s+/g, '-')
+                      .replace(/--+/g, '-')
+                      .trim() + '-' + Math.random().toString(36).substring(2, 5);
+                  }
+
+                  console.log('2. Updating table "products"...', { id: editingProduct.id, updates: productUpdates });
+                  const { error: prodErr } = await supabase
+                    .from('products')
+                    .update(productUpdates)
+                    .eq('id', editingProduct.id);
+
+                  if (prodErr) {
+                    if (prodErr.message.includes('row-level security policy')) {
+                      alert('ERRO DE PERMISSÃO NA EDIÇÃO:\n\nSua tabela "products" está travada para UPDATE pelo RLS.\n\nPara resolver:\n1. Vá no Supabase > Database > Tables > products\n2. Em "RLS / Policies", adicione permissão para "UPDATE".');
+                    }
+                    throw prodErr;
+                  }
+                  console.log('2. Product table updated.');
+
+                  // Update or Add variants in Edit
+                  // (Note: Currently simplifying to just update the existing variants provided in form if needed, 
+                  // but we'll stick to updating the provided base price if no complex variant management yet)
+                  if (editingProduct.variants && editingProduct.variants.length > 0) {
+                    const baseVariant = editingProduct.variants[0];
+                    const newPrice = Number(formData.get('price')) || 0;
+                    console.log('3. Updating base variant price...', { variantId: baseVariant.id, newPrice });
+                    
+                    const { error: varErr } = await supabase
+                      .from('product_variants')
+                      .update({ price: newPrice })
+                      .eq('id', baseVariant.id);
+                    
+                    if (varErr) throw varErr;
+                    console.log('3. Base variant updated.');
+                  }
+
+                  // ETAPA EXTRA: Atualizar vínculo na tabela product_images
+                  if (finalImageUrl !== editingProduct.image) {
+                    console.log('--- ETAPA EXTRA: Atualizando vínculo em product_images ---');
+                    const { error: imgUpdateErr } = await supabase
+                      .from('product_images')
+                      .upsert({
+                        product_id: editingProduct.id,
+                        image_url: finalImageUrl,
+                        is_primary: true,
+                        position: 0
+                      }, { onConflict: 'product_id, is_primary' }); // Assume que existe uma UNIQUE ou que vamos sobrescrever
+
+                    if (imgUpdateErr) {
+                      console.warn('Erro (não crítico) ao atualizar product_images:', imgUpdateErr);
+                    } else {
+                      console.log('Tabela product_images atualizada.');
+                    }
+                  }
+
+                  console.log('4. Fetching fresh data...');
+                  await fetchProducts(); 
+                  console.log('5. Closing modal.');
+                  setEditingProduct(null);
+                  alert('Produto atualizado com sucesso!');
+                } catch (err: any) { 
+                  console.error('CRITICAL ERROR DURING UPDATE:', err);
+                  alert('Falha ao salvar: ' + (err.message || 'Erro desconhecido no servidor')); 
+                } finally {
+                  console.log('--- UPDATE PROCESS FINISHED ---');
+                  setUploadLoading(false);
+                }
+              }}>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Nome do Produto</label>
+                    <input name="name" defaultValue={editingProduct.name} required className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs focus:outline-none focus:border-brand-gold" />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Categoria</label>
+                    <select name="category" defaultValue={editingProduct.category} required className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs text-white focus:outline-none focus:border-brand-gold">
+                      {PRODUCT_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Descrição</label>
+                    <textarea name="description" defaultValue={editingProduct.description} rows={3} className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs focus:outline-none focus:border-brand-gold" />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-[10px] uppercase tracking-widest text-brand-gold font-bold">Foto do Produto (Deixe em branco para manter a atual)</label>
+                    <div className="flex gap-4 items-start">
+                      <div className="w-24 h-24 border border-brand-gold/20 overflow-hidden shrink-0">
+                        <img src={editingProduct.image} className="w-full h-full object-cover" alt="Atual" />
+                      </div>
+                      <div className="flex-1 space-y-4">
+                        <label className="block border-2 border-dashed border-brand-gold/20 hover:border-brand-gold/50 transition-colors p-4 text-center cursor-pointer bg-brand-red">
+                           <Upload size={16} className="text-brand-gold mx-auto mb-2" />
+                           <span className="text-[9px] uppercase font-bold tracking-widest text-white/60">Upload Nova Foto</span>
+                           <input 
+                             name="edit_product_file"
+                             type="file" 
+                             className="hidden" 
+                             accept="image/*" 
+                             onChange={(e) => {
+                               const fileName = e.target.files?.[0]?.name;
+                               if (fileName) {
+                                 const span = e.currentTarget.parentElement?.querySelector('span');
+                                 if (span) span.innerText = `Nova: ${fileName}`;
+                               }
+                             }}
+                           />
+                        </label>
+                        <input name="image_url" placeholder="Ou cole uma nova URL" className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs focus:outline-none focus:border-brand-gold" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4">
+                    <div>
+                      <label className="block text-[10px] uppercase tracking-widest text-brand-gold mb-1 font-bold">Preço (R$)</label>
+                      <input name="price" type="number" step="0.01" defaultValue={editingProduct.price} required className="w-full bg-brand-red border border-brand-gold/20 px-4 py-3 text-xs focus:outline-none focus:border-brand-gold" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button 
+                    type="button" 
+                    onClick={() => setEditingProduct(null)}
+                    className="flex-1 border border-brand-gold/20 py-4 uppercase font-bold text-xs hover:bg-white/5 transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    type="submit" 
+                    disabled={uploadLoading} 
+                    className="flex-1 btn-gold py-4 uppercase font-bold text-xs"
+                  >
+                    {uploadLoading ? 'Salvando...' : 'Salvar Alterações'}
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}
@@ -1758,7 +3047,6 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
-      <Analytics />
     </div>
   );
 }
