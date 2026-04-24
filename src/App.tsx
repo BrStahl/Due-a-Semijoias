@@ -2630,21 +2630,30 @@ export default function App() {
                   }
                   console.log('2. Product table updated.');
 
-                  // Update or Add variants in Edit
-                  // (Note: Currently simplifying to just update the existing variants provided in form if needed, 
-                  // but we'll stick to updating the provided base price if no complex variant management yet)
+                  // Garante persistência do preço no Supabase mesmo quando o produto não tem variante ainda.
+                  const newPrice = Number(formData.get('price')) || 0;
                   if (editingProduct.variants && editingProduct.variants.length > 0) {
                     const baseVariant = editingProduct.variants[0];
-                    const newPrice = Number(formData.get('price')) || 0;
                     console.log('3. Updating base variant price...', { variantId: baseVariant.id, newPrice });
-                    
+
                     const { error: varErr } = await supabase
                       .from('product_variants')
                       .update({ price: newPrice })
                       .eq('id', baseVariant.id);
-                    
+
                     if (varErr) throw varErr;
                     console.log('3. Base variant updated.');
+                  } else {
+                    console.log('3. No variant found. Creating base variant...', { productId: editingProduct.id, newPrice });
+                    const { error: insertVarErr } = await supabase
+                      .from('product_variants')
+                      .insert({
+                        product_id: editingProduct.id,
+                        price: newPrice
+                      });
+
+                    if (insertVarErr) throw insertVarErr;
+                    console.log('3. Base variant created.');
                   }
 
                   // ETAPA EXTRA: Atualizar vínculo na tabela product_images
