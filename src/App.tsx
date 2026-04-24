@@ -416,8 +416,8 @@ export default function App() {
       }
 
       console.log('Iniciando busca no Supabase com estrutura atualizada...');
-      
-      // Buscando da tabela "products" com relação "product_variants" (singular)
+
+      // 1) Buscar produtos com variantes
       const { data, error } = await supabase
         .from('products')
         .select(`
@@ -433,6 +433,31 @@ export default function App() {
       }
 
       if (data) {
+        // 2) Buscar imagens vinculadas na tabela product_images (primária > posição)
+        const productIds = data.map((p: any) => p.id).filter(Boolean);
+        const imageByProductId = new Map<string, string>();
+
+        if (productIds.length > 0) {
+          const { data: imageRows, error: imageErr } = await supabase
+            .from('product_images')
+            .select('product_id, image_url, is_primary, position')
+            .in('product_id', productIds)
+            .order('is_primary', { ascending: false })
+            .order('position', { ascending: true });
+
+          if (imageErr) {
+            console.warn('Não foi possível buscar product_images, seguindo com products.image_url:', imageErr);
+          } else if (imageRows) {
+            for (const img of imageRows) {
+              const productId = String(img.product_id);
+              // Mantém a primeira imagem encontrada após a ordenação (primária primeiro)
+              if (!imageByProductId.has(productId) && img.image_url) {
+                imageByProductId.set(productId, img.image_url);
+              }
+            }
+          }
+        }
+
         console.log('Dados crus recebidos:', data);
         const mapped = data.map((p: any) => {
           const variants = p.product_variants || [];
@@ -446,7 +471,7 @@ export default function App() {
             name: p.name || 'Sem nome',
             category: p.category || 'Geral',
             price: basePrice,
-            image: p.image_url || 'https://images.unsplash.com/photo-1512331283953-19967202267a?auto=format&fit=crop&q=80&w=600',
+            image: imageByProductId.get(String(p.id)) || p.image_url || 'https://images.unsplash.com/photo-1512331283953-19967202267a?auto=format&fit=crop&q=80&w=600',
             badge: p.active && p.created_at && (new Date().getTime() - new Date(p.created_at).getTime() < 7 * 24 * 60 * 60 * 1000) ? 'Novidade' : undefined,
             description: p.description || '',
             variants: variants.map((v: any) => ({
@@ -2228,7 +2253,7 @@ export default function App() {
                                 image_url: finalImageUrl || 'https://images.unsplash.com/photo-1512331283953-19967202267a?auto=format&fit=crop&q=80&w=600',
                                 is_primary: true,
                                 position: 0
-                              }, { onConflict: 'product_id, is_primary' });
+                              }, { onConflict: 'product_id,is_primary' });
 
                             if (imgTableErr) {
                               console.warn('Erro (não crítico) ao inserir em product_images:', imgTableErr);
@@ -2666,7 +2691,7 @@ export default function App() {
                         image_url: finalImageUrl,
                         is_primary: true,
                         position: 0
-                      }, { onConflict: 'product_id, is_primary' }); // Assume que existe uma UNIQUE ou que vamos sobrescrever
+                      }, { onConflict: 'product_id,is_primary' }); // Assume que existe uma UNIQUE ou que vamos sobrescrever
 
                     if (imgUpdateErr) {
                       console.warn('Erro (não crítico) ao atualizar product_images:', imgUpdateErr);
